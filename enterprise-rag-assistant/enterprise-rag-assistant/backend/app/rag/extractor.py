@@ -30,28 +30,63 @@ class PageText:
 
 
 def _clean_text(text: str) -> str:
-    """Normalize whitespace, drop control chars, collapse repeated blank lines."""
+    """Normalize whitespace, join line-broken words, collapse extra blank lines while preserving paragraph breaks."""
+    if not text:
+        return ""
     text = text.replace("\x00", "")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+    # Join hyphenated words split across lines
+    text = re.sub(r"(\w+)-\n(\w+)", r"\1\2", text)
+    # Replace non-breaking spaces and tabs with standard space
+    text = text.replace("\xa0", " ").replace("\t", " ")
+    # Replace single line breaks inside paragraphs with single spaces, preserving double line breaks
+    lines = text.split("\n")
+    cleaned_lines = []
+    current_para = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if current_para:
+                cleaned_lines.append(" ".join(current_para))
+                current_para = []
+        else:
+            current_para.append(stripped)
+    if current_para:
+        cleaned_lines.append(" ".join(current_para))
+
+    result = "\n\n".join(cleaned_lines)
+    result = re.sub(r"[ \t]+", " ", result)
+    return result.strip()
 
 
 def extract_pdf(file_bytes: bytes) -> list[PageText]:
-    try:
-        reader = PdfReader(io.BytesIO(file_bytes))
-    except Exception as e:
-        raise ExtractionError(f"Corrupted or unreadable PDF: {e}")
-
     pages = []
-    for i, page in enumerate(reader.pages, start=1):
+    # 1. Try PyMuPDF (fitz) - high-speed, preserves reading order and text blocks across 500+ pages
+    try:
+        import fitz
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        for i, page in enumerate(doc, start=1):
+            raw = page.get_text("text") or ""
+            cleaned = _clean_text(raw)
+            if cleaned:
+                pages.append(PageText(page_number=i, text=cleaned))
+    except Exception as exc:
+        pages = []
+
+    # 2. Fallback to pypdf if PyMuPDF fails
+    if not pages:
         try:
-            raw = page.extract_text() or ""
-        except Exception:
-            raw = ""  # a single bad page shouldn't kill the whole document
-        cleaned = _clean_text(raw)
-        if cleaned:
-            pages.append(PageText(page_number=i, text=cleaned))
+            reader = PdfReader(io.BytesIO(file_bytes))
+            for i, page in enumerate(reader.pages, start=1):
+                try:
+                    raw = page.extract_text(layout_mode_space_vertically=False) or page.extract_text() or ""
+                except Exception:
+                    raw = ""
+                cleaned = _clean_text(raw)
+                if cleaned:
+                    pages.append(PageText(page_number=i, text=cleaned))
+        except Exception as e:
+            raise ExtractionError(f"Corrupted or unreadable PDF: {e}")
 
     if not pages:
         raise EmptyDocumentError("PDF contains no extractable text (may be scanned/image-only).")

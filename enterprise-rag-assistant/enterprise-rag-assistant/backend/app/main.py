@@ -47,6 +47,14 @@ def scheduled_sync_job():
 async def lifespan(app: FastAPI):
     logger.info("Starting up: initializing database...")
     init_db()
+
+    db = SessionLocal()
+    try:
+        from app.rag.pipeline import rebuild_bm25_index
+        rebuild_bm25_index(db)
+    finally:
+        db.close()
+
     scheduler.add_job(
         scheduled_sync_job,
         "interval",

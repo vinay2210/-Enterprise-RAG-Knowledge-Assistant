@@ -186,6 +186,9 @@ export default function App() {
     return matches.length ? matches : null;
   };
 
+  const [strategy, setStrategy] = useState("hybrid");
+  const [topK, setTopK] = useState(6);
+
   const handleSend = async () => {
     if (!input.trim() || loading) return;
     const userMessage = input;
@@ -198,7 +201,8 @@ export default function App() {
         session_id: sessionId,
         message: userMessage,
         file_filter: fileFilter,
-        top_k: 6,
+        top_k: Number(topK),
+        strategy: strategy,
       });
       setSessionId(res.session_id);
       setMessages((prev) => [...prev, { role: "assistant", content: res.answer, citations: res.citations }]);
@@ -288,6 +292,27 @@ export default function App() {
           <div ref={chatEndRef} />
         </div>
 
+        <div style={styles.toolbar}>
+          <div style={styles.controlGroup}>
+            <span style={styles.controlLabel}>RAG Strategy:</span>
+            <select style={styles.select} value={strategy} onChange={(e) => setStrategy(e.target.value)}>
+              <option value="hybrid">⚡ Hybrid (Dense Vector + BM25 Sparse)</option>
+              <option value="vector">🔍 Dense Vector Similarity Only</option>
+              <option value="bm25">🔤 BM25 Exact Keyword Only</option>
+            </select>
+          </div>
+
+          <div style={styles.controlGroup}>
+            <span style={styles.controlLabel}>Retrieval Depth:</span>
+            <select style={styles.select} value={topK} onChange={(e) => setTopK(e.target.value)}>
+              <option value="4">Top 4 Chunks</option>
+              <option value="6">Top 6 Chunks (Default)</option>
+              <option value="10">Top 10 Chunks (Deep)</option>
+              <option value="15">Top 15 Chunks (500+ Page Docs)</option>
+            </select>
+          </div>
+        </div>
+
         <div style={styles.inputRow}>
           <input
             style={styles.input}
@@ -333,6 +358,10 @@ const styles = {
   botBubble: { alignSelf: "flex-start", background: "#1f2937", color: "#e5e7eb", padding: "10px 14px", borderRadius: 12, maxWidth: "75%" },
   citations: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 },
   citationChip: { fontSize: 11, background: "#111827", padding: "4px 8px", borderRadius: 6, color: "#93c5fd", cursor: "help" },
+  toolbar: { display: "flex", gap: 16, padding: "8px 16px", background: "#0f172a", borderTop: "1px solid #1f2937", alignItems: "center" },
+  controlGroup: { display: "flex", alignItems: "center", gap: 6 },
+  controlLabel: { fontSize: 12, color: "#94a3b8", fontWeight: 500 },
+  select: { background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", borderRadius: 6, padding: "4px 8px", fontSize: 12, outline: "none" },
   inputRow: { display: "flex", gap: 8, padding: 16, borderTop: "1px solid #1f2937" },
   input: { flex: 1, padding: "12px 14px", borderRadius: 10, border: "1px solid #374151", background: "#111827", color: "white", fontSize: 14 },
   sendBtn: { padding: "0 20px", borderRadius: 10, border: "none", background: "#2563eb", color: "white", cursor: "pointer", fontSize: 14 },

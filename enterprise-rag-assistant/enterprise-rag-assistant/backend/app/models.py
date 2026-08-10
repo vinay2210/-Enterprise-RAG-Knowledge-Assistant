@@ -64,6 +64,7 @@ class DocumentChunk(Base):
     chunk_index = Column(Integer, nullable=False)
     page_number = Column(Integer, nullable=True)
     text = Column(Text, nullable=False)
+    parent_text = Column(Text, nullable=True)
     token_count = Column(Integer, default=0)
     vector_id = Column(String, nullable=False)  # id used in the Chroma collection
 

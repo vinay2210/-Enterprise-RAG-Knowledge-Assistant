@@ -49,7 +49,7 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
 
     file_filter = _resolve_file_filter(db, req.file_filter)
     try:
-        hits = retrieve(req.message, top_k=req.top_k, file_filter=file_filter)
+        hits = retrieve(req.message, top_k=req.top_k, file_filter=file_filter, strategy=req.strategy)
     except Exception as e:
         logger.warning(f"Retrieval failed, returning no results: {e}")
         hits = []
@@ -70,8 +70,8 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
                 file_name=h["file_name"],
                 page_number=h["page_number"],
                 chunk_index=h["chunk_index"],
-                snippet=h["text"][:280],
-                score=round(h["score"], 4),
+                snippet=(h.get("parent_text") or h["text"])[:280],
+                score=round(h.get("rrf_score") or h.get("score", 0.0), 4),
             )
             for h in hits
         ]
@@ -91,7 +91,7 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
 def chat_stream(req: ChatRequest, db: Session = Depends(get_db)):
     """Bonus: streaming responses (Server-Sent-Events-style chunked text)."""
     file_filter = _resolve_file_filter(db, req.file_filter)
-    hits = retrieve(req.message, top_k=req.top_k, file_filter=file_filter)
+    hits = retrieve(req.message, top_k=req.top_k, file_filter=file_filter, strategy=req.strategy)
 
     def event_generator():
         if not hits:

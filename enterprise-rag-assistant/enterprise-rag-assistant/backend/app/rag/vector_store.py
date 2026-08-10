@@ -44,6 +44,8 @@ def upsert_chunks(document_id: str, file_name: str, chunks: list, embeddings: li
             "file_name": file_name,
             "chunk_index": c.chunk_index,
             "page_number": c.page_number,
+            "parent_text": getattr(c, "parent_text", c.text),
+            "section_title": getattr(c, "section_title", ""),
         }
         for c in chunks
     ]
@@ -64,7 +66,7 @@ def upsert_chunks(document_id: str, file_name: str, chunks: list, embeddings: li
     return ids
 
 
-def query(query_text: str, top_k: int = 6, file_names: list[str] | None = None) -> list[dict]:
+def query(query_text: str, top_k: int = 10, file_names: list[str] | None = None) -> list[dict]:
     try:
         collection = get_collection()
         embedder = get_embedder()
@@ -89,11 +91,14 @@ def query(query_text: str, top_k: int = 6, file_names: list[str] | None = None) 
             hits.append({
                 "vector_id": id_,
                 "text": doc,
+                "parent_text": meta.get("parent_text", doc),
+                "section_title": meta.get("section_title", ""),
                 "document_id": meta.get("document_id"),
                 "file_name": meta.get("file_name"),
                 "chunk_index": meta.get("chunk_index"),
                 "page_number": meta.get("page_number"),
-                "score": 1 - dist,  # cosine distance -> similarity
+                "score": round(1 - dist, 4),  # cosine distance -> similarity
+                "retrieval_source": "dense",
             })
         return hits
     except Exception as exc:

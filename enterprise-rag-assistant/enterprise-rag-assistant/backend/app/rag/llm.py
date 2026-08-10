@@ -24,10 +24,13 @@ Rules:
 
 
 def _build_prompt(question: str, context_chunks: list[dict]) -> str:
-    context_block = "\n\n".join(
-        f"[Source: {c['file_name']}, Page {c['page_number']}]\n{c['text']}"
-        for c in context_chunks
-    )
+    formatted_excerpts = []
+    for c in context_chunks:
+        text = c.get("parent_text") or c.get("text", "")
+        sec = f" | Section: {c['section_title']}" if c.get("section_title") else ""
+        formatted_excerpts.append(f"[Source: {c['file_name']}, Page {c['page_number']}{sec}]\n{text}")
+
+    context_block = "\n\n".join(formatted_excerpts)
     return f"CONTEXT:\n{context_block}\n\nQUESTION: {question}\n\nANSWER:"
 
 

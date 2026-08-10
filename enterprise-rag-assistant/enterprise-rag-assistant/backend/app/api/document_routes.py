@@ -1,10 +1,10 @@
 """Manual upload endpoint (useful for testing without wiring up Drive first)."""
 import uuid
 
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 
-from app.database import get_db
+from app.database import get_db, SessionLocal
 from app.models import Document, DocumentStatus
 from app.drive.drive_service import DriveService
 from app.rag.pipeline import process_document
@@ -32,8 +32,22 @@ class _LocalFileDrive:
         return self.content
 
 
+def _async_process(doc_id: str, content: bytes):
+    db = SessionLocal()
+    try:
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        if doc:
+            process_document(db, doc, _LocalFileDrive(content))
+    finally:
+        db.close()
+
+
 @router.post("/upload")
-async def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
     ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
     if ext not in EXT_TO_MIME:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: .{ext}")
@@ -54,6 +68,5 @@ async def upload_document(file: UploadFile = File(...), db: Session = Depends(ge
     db.commit()
     db.refresh(doc)
 
-    process_document(db, doc, _LocalFileDrive(content))
-    db.refresh(doc)
+    background_tasks.add_task(_async_process, doc.id, content)
     return {"id": doc.id, "status": doc.status, "chunk_count": doc.chunk_count}

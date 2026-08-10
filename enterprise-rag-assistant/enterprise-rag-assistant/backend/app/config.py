@@ -52,7 +52,7 @@ class Settings(BaseSettings):
 
     # Sync
     drive_poll_interval_seconds: int = 60
-    max_file_size_mb: int = 20
+    max_file_size_mb: int = 200
 
     # Security
     session_secret: str = "dev-secret-change-me"

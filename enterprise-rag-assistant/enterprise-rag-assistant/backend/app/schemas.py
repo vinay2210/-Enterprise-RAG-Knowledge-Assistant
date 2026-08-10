@@ -36,6 +36,7 @@ class ChatRequest(BaseModel):
     message: str
     file_filter: Optional[List[str]] = None  # file names from @mentions, empty = global search
     top_k: int = 6
+    strategy: str = "hybrid"  # "hybrid" | "vector" | "bm25"
 
 
 class Citation(BaseModel):

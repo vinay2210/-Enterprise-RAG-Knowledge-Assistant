@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.models import Document, DocumentChunk, DocumentStatus
 from app.rag import extractor, chunker, vector_store
 from app.rag.embeddings import get_embedder
+from app.rag.bm25_retriever import get_bm25_index
 from app.drive.drive_service import DriveService
 from app.utils.logger import logger
 
@@ -83,15 +84,31 @@ def process_document(db: Session, document: Document, drive: DriveService) -> No
 
         # Mirror chunk metadata in SQL for fast relational lookups/deletes.
         db.query(DocumentChunk).filter(DocumentChunk.document_id == document.id).delete()
+        bm25_dicts = []
         for c, vid in zip(chunks, vector_ids):
+            parent_txt = getattr(c, "parent_text", c.text)
             db.add(DocumentChunk(
                 document_id=document.id,
                 chunk_index=c.chunk_index,
                 page_number=c.page_number,
                 text=c.text,
+                parent_text=parent_txt,
                 token_count=c.token_count,
                 vector_id=vid,
             ))
+            bm25_dicts.append({
+                "vector_id": vid,
+                "text": c.text,
+                "parent_text": parent_txt,
+                "document_id": document.id,
+                "file_name": document.file_name,
+                "page_number": c.page_number,
+                "chunk_index": c.chunk_index,
+            })
+
+        # ---- Index in BM25 Sparse Index ----
+        bm25_index = get_bm25_index()
+        bm25_index.add_chunks(bm25_dicts)
 
         document.chunk_count = len(chunks)
         document.status = DocumentStatus.READY
@@ -105,3 +122,33 @@ def process_document(db: Session, document: Document, drive: DriveService) -> No
         document.status = DocumentStatus.FAILED
         document.error_message = str(e)[:1000]
         db.commit()
+
+
+def rebuild_bm25_index(db: Session) -> None:
+    """Populates BM25 index from active ready document chunks on server startup."""
+    try:
+        active_docs = db.query(Document).filter(Document.status == DocumentStatus.READY).all()
+        active_doc_ids = [d.id for d in active_docs]
+        if not active_doc_ids:
+            return
+
+        doc_map = {d.id: d.file_name for d in active_docs}
+        sql_chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id.in_(active_doc_ids)).all()
+
+        bm25_dicts = []
+        for sc in sql_chunks:
+            bm25_dicts.append({
+                "vector_id": sc.vector_id,
+                "text": sc.text,
+                "parent_text": sc.parent_text or sc.text,
+                "document_id": sc.document_id,
+                "file_name": doc_map.get(sc.document_id, "Document"),
+                "page_number": sc.page_number,
+                "chunk_index": sc.chunk_index,
+            })
+
+        get_bm25_index().add_chunks(bm25_dicts)
+        logger.info(f"Rebuilt BM25 index with {len(bm25_dicts)} chunks across {len(active_docs)} documents.")
+    except Exception as e:
+        logger.warning(f"Failed to rebuild BM25 index on startup: {e}")
+

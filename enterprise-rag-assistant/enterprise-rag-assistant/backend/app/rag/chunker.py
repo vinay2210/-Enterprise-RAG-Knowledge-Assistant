@@ -15,7 +15,8 @@ We use tiktoken purely as a consistent, fast token counter (not tied to any
 one LLM) - chunk sizes are defined in tokens rather than characters because
 token count is what actually determines embedding/LLM context usage.
 """
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 
 import tiktoken
 
@@ -30,49 +31,98 @@ _encoding = tiktoken.get_encoding("cl100k_base")
 class Chunk:
     chunk_index: int
     page_number: int
-    text: str
+    text: str  # Child chunk text (high precision for vector indexing)
+    parent_text: str  # Enclosing parent context (fed to LLM for rich context)
     token_count: int
+    section_title: str = ""
 
 
-def _split_page_into_chunks(page_text: str, chunk_size: int, overlap: int) -> list[str]:
-    tokens = _encoding.encode(page_text)
-    if len(tokens) <= chunk_size:
-        return [page_text]
+def _count_tokens(text: str) -> int:
+    return len(_encoding.encode(text))
 
-    chunks = []
-    start = 0
-    while start < len(tokens):
-        end = min(start + chunk_size, len(tokens))
-        chunk_tokens = tokens[start:end]
-        chunks.append(_encoding.decode(chunk_tokens))
-        if end == len(tokens):
-            break
-        start = end - overlap  # step forward, keeping `overlap` tokens of context
-    return chunks
+
+def _extract_heading(paragraph: str) -> str:
+    """Find title/heading pattern like # Heading, Section 1:, 1.2 Title, etc."""
+    line = paragraph.strip().split("\n")[0]
+    if line.startswith("#"):
+        return line.lstrip("#").strip()
+    if re.match(r"^(section|chapter|\d+(\.\d+)*)\b", line, re.IGNORECASE):
+        return line[:60].strip()
+    return ""
 
 
 def chunk_pages(
     pages: list[PageText],
-    chunk_size: int | None = None,
-    overlap: int | None = None,
+    child_chunk_size: int | None = None,
+    child_overlap: int | None = None,
+    parent_chunk_size: int = 1000,
 ) -> list[Chunk]:
-    chunk_size = chunk_size or settings.chunk_size_tokens
-    overlap = overlap or settings.chunk_overlap_tokens
+    """Hierarchical & Structural Chunking:
+    - Splits document into semantic paragraphs/sections.
+    - Creates compact Child Chunks (default ~250 tokens) for vector similarity precision.
+    - Binds each child chunk to a Parent Context (up to ~1000 tokens / page context) so the LLM
+      gets full sentence/paragraph structures without losing page attribution.
+    """
+    child_chunk_size = child_chunk_size or 250
+    child_overlap = child_overlap or 50
 
     chunks: list[Chunk] = []
-    idx = 0
+    global_idx = 0
+
     for page in pages:
-        for piece in _split_page_into_chunks(page.text, chunk_size, overlap):
-            piece = piece.strip()
-            if not piece:
-                continue
-            chunks.append(
-                Chunk(
-                    chunk_index=idx,
-                    page_number=page.page_number,
-                    text=piece,
-                    token_count=len(_encoding.encode(piece)),
+        page_text = page.text.strip()
+        if not page_text:
+            continue
+
+        # Split page into structural paragraphs
+        paragraphs = [p.strip() for p in re.split(r"\n\n+", page_text) if p.strip()]
+        current_section = f"Page {page.page_number}"
+
+        for i, para in enumerate(paragraphs):
+            heading = _extract_heading(para)
+            if heading:
+                current_section = heading
+
+            # Determine Parent Context (the paragraph itself or surrounding paragraphs on the page)
+            parent_context = page_text
+            para_tokens = _encoding.encode(para)
+
+            if len(para_tokens) <= child_chunk_size:
+                child_text = para
+                chunks.append(
+                    Chunk(
+                        chunk_index=global_idx,
+                        page_number=page.page_number,
+                        text=child_text,
+                        parent_text=parent_context,
+                        token_count=len(para_tokens),
+                        section_title=current_section,
+                    )
                 )
-            )
-            idx += 1
+                global_idx += 1
+            else:
+                # Large paragraph: sliding window child chunks inside the paragraph context
+                start = 0
+                while start < len(para_tokens):
+                    end = min(start + child_chunk_size, len(para_tokens))
+                    piece_tokens = para_tokens[start:end]
+                    child_text = _encoding.decode(piece_tokens).strip()
+
+                    if child_text:
+                        chunks.append(
+                            Chunk(
+                                chunk_index=global_idx,
+                                page_number=page.page_number,
+                                text=child_text,
+                                parent_text=parent_context,
+                                token_count=len(piece_tokens),
+                                section_title=current_section,
+                            )
+                        )
+                        global_idx += 1
+
+                    if end == len(para_tokens):
+                        break
+                    start = end - child_overlap
+
     return chunks
