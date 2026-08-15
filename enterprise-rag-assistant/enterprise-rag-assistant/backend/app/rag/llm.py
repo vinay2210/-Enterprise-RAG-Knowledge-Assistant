@@ -6,10 +6,13 @@ generate(prompt) -> str interface, and a streaming variant for the bonus
 """
 from typing import Iterator
 
+import tiktoken
+
 from app.config import get_settings
 from app.utils.logger import logger
 
 settings = get_settings()
+_encoding = tiktoken.get_encoding("cl100k_base")
 
 SYSTEM_PROMPT = """You are an enterprise knowledge assistant. Answer the user's question
 using ONLY the information in the provided context chunks. Each chunk is labeled with
@@ -20,17 +23,67 @@ Rules:
   do not make anything up.
 - Cite sources inline like this: (DocumentName, p.PageNumber) right after each claim.
 - Be concise and directly answer the question first, then add supporting detail.
+- When the context contains information from multiple pages or sections, synthesize
+  a coherent answer that draws from all relevant parts.
+- If a question asks about a specific topic, focus your answer on that topic even if
+  the context contains other information.
 """
+
+# Maximum tokens of context to feed to the LLM to avoid overwhelming the model
+# or exceeding context windows. Prioritize high-scoring chunks.
+_MAX_CONTEXT_TOKENS = 6000
 
 
 def _build_prompt(question: str, context_chunks: list[dict]) -> str:
+    """Build a prompt with smart context assembly:
+    - Deduplicates identical parent_text content (multiple child chunks from the same page)
+    - Prioritizes parent_text for highest-scoring chunks, child text for lower-scoring ones
+    - Caps total context to _MAX_CONTEXT_TOKENS to stay within model limits
+    """
     formatted_excerpts = []
-    for c in context_chunks:
-        text = c.get("parent_text") or c.get("text", "")
-        sec = f" | Section: {c['section_title']}" if c.get("section_title") else ""
-        formatted_excerpts.append(f"[Source: {c['file_name']}, Page {c['page_number']}{sec}]\n{text}")
+    seen_parent_texts = set()
+    total_tokens = 0
 
-    context_block = "\n\n".join(formatted_excerpts)
+    for c in context_chunks:
+        # For higher-scoring chunks, prefer parent_text (richer context).
+        # Deduplicate identical parent_text (multiple chunks from same page produce same parent).
+        parent_text = c.get("parent_text") or ""
+        child_text = c.get("text", "")
+        sec = f" | Section: {c['section_title']}" if c.get("section_title") else ""
+        header = f"[Source: {c['file_name']}, Page {c['page_number']}{sec}]"
+
+        # Decide which text to use: parent_text gives more context but may be repeated
+        # Use the complete context as the deduplication key.  Prefix-only
+        # hashes can collapse different parts of a long page that happen to
+        # start alike, hiding the answer after retrieval found it.
+        parent_hash = parent_text if parent_text else None
+
+        if parent_text and parent_hash not in seen_parent_texts:
+            text_to_use = parent_text
+            seen_parent_texts.add(parent_hash)
+        else:
+            # Either parent_text is empty, or we already included it from another chunk
+            # on the same page. Use the child text instead (it's unique per chunk).
+            text_to_use = child_text
+
+        # Check token budget
+        excerpt = f"{header}\n{text_to_use}"
+        excerpt_tokens = len(_encoding.encode(excerpt))
+
+        if total_tokens + excerpt_tokens > _MAX_CONTEXT_TOKENS:
+            # Try with just child text (smaller) if parent was too big
+            if text_to_use == parent_text and child_text:
+                excerpt = f"{header}\n{child_text}"
+                excerpt_tokens = len(_encoding.encode(excerpt))
+                if total_tokens + excerpt_tokens > _MAX_CONTEXT_TOKENS:
+                    break
+            else:
+                break
+
+        formatted_excerpts.append(excerpt)
+        total_tokens += excerpt_tokens
+
+    context_block = "\n\n---\n\n".join(formatted_excerpts)
     return f"CONTEXT:\n{context_block}\n\nQUESTION: {question}\n\nANSWER:"
 
 

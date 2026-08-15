@@ -96,16 +96,24 @@ def get_embedder():
     if settings.embedding_provider == "openai":
         if not settings.openai_api_key:
             raise RuntimeError("EMBEDDING_PROVIDER=openai requires OPENAI_API_KEY in .env")
+        logger.info("✅ Embedding provider: OpenAI (text-embedding-3-small)")
         return OpenAIEmbedder("text-embedding-3-small", settings.openai_api_key)
     # Prefer the local embedder, but if loading it fails (e.g. App Control
     # blocked a Torch DLL) try to fall back to OpenAI if the API key is set.
     try:
-        return LocalEmbedder(settings.embedding_model)
+        embedder = LocalEmbedder(settings.embedding_model)
+        logger.info(f"✅ Embedding provider: Local ({settings.embedding_model})")
+        return embedder
     except Exception as e:
         logger.warning("Local embedder failed to initialize: %s", e)
         if settings.openai_api_key:
             logger.info("Falling back to OpenAI embedder because OPENAI_API_KEY is set.")
             return OpenAIEmbedder("text-embedding-3-small", settings.openai_api_key)
 
-        logger.info("Falling back to deterministic local embeddings because the torch-based model is unavailable.")
+        logger.error(
+            "⚠️⚠️⚠️ CRITICAL: Falling back to SimpleEmbedder (hash-based, NO semantic understanding). "
+            "Retrieval quality will be SEVERELY DEGRADED for all queries. "
+            "To fix this: install sentence-transformers (`pip install sentence-transformers`) "
+            "or set EMBEDDING_PROVIDER=openai with a valid OPENAI_API_KEY in .env"
+        )
         return SimpleEmbedder()

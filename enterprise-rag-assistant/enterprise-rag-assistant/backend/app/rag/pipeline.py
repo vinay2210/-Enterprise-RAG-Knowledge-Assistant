@@ -57,7 +57,11 @@ def process_document(db: Session, document: Document, drive: DriveService) -> No
         # ---- Chunk ----
         document.status = DocumentStatus.CHUNKING
         db.commit()
-        chunks = chunker.chunk_pages(pages)
+        chunks = chunker.chunk_pages(
+            pages,
+            child_chunk_size=get_settings().chunk_size_tokens,
+            child_overlap=get_settings().chunk_overlap_tokens,
+        )
         del pages
         if not chunks:
             document.status = DocumentStatus.EMPTY
@@ -80,6 +84,12 @@ def process_document(db: Session, document: Document, drive: DriveService) -> No
             all_embeddings.extend(batch_vectors)
 
         # ---- Store in Vector DB ----
+        # A modified document may now contain fewer chunks than its old version.
+        # Delete the old vector and sparse-index entries before writing the new
+        # set so obsolete passages can never be returned for a 500-page file.
+        vector_store.delete_document(document.id)
+        bm25_index = get_bm25_index()
+        bm25_index.delete_document(document.id)
         vector_ids = vector_store.upsert_chunks(document.id, document.file_name, chunks, all_embeddings)
 
         # Mirror chunk metadata in SQL for fast relational lookups/deletes.
@@ -107,7 +117,6 @@ def process_document(db: Session, document: Document, drive: DriveService) -> No
             })
 
         # ---- Index in BM25 Sparse Index ----
-        bm25_index = get_bm25_index()
         bm25_index.add_chunks(bm25_dicts)
 
         document.chunk_count = len(chunks)
@@ -151,4 +160,3 @@ def rebuild_bm25_index(db: Session) -> None:
         logger.info(f"Rebuilt BM25 index with {len(bm25_dicts)} chunks across {len(active_docs)} documents.")
     except Exception as e:
         logger.warning(f"Failed to rebuild BM25 index on startup: {e}")
-

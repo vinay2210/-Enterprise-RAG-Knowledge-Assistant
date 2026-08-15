@@ -35,7 +35,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     message: str
     file_filter: Optional[List[str]] = None  # file names from @mentions, empty = global search
-    top_k: int = 6
+    top_k: int = 10
     strategy: str = "hybrid"  # "hybrid" | "vector" | "bm25"
 
 

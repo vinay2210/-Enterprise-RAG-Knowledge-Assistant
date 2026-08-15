@@ -70,6 +70,23 @@ def test_bm25_sparse_indexing_and_query():
     print("[OK] Test 3 Passed: BM25 sparse index accurately retrieved exact technical code 'SEC-994821'")
 
 
+def test_bm25_deletion_removes_old_document_passages():
+    index = BM25Index()
+    index.add_chunks([{
+        "vector_id": "old-doc::0",
+        "text": "The obsolete service pin is OLD-319.",
+        "parent_text": "The obsolete service pin is OLD-319.",
+        "document_id": "old-doc",
+        "file_name": "manual.pdf",
+        "page_number": 8,
+        "chunk_index": 0,
+    }])
+
+    assert index.query("OLD-319", top_k=1)
+    index.delete_document("old-doc")
+    assert index.query("OLD-319", top_k=1) == []
+
+
 def test_reciprocal_rank_fusion():
     dense_hits = [
         {"vector_id": "c1", "file_name": "doc.pdf", "page_number": 1, "chunk_index": 0, "text": "A"},

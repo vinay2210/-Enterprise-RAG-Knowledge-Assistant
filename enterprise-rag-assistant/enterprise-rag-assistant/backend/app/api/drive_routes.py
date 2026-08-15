@@ -8,6 +8,7 @@ from app.database import get_db
 from app.drive.sync import run_sync
 from app.models import Document, DocumentStatus
 from app.rag import vector_store
+from app.rag.bm25_retriever import get_bm25_index
 from app.schemas import DocumentOut, SyncTriggerOut
 from app.utils.logger import logger
 
@@ -72,6 +73,7 @@ def delete_document(document_id: str, db: Session = Depends(get_db)):
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     vector_store.delete_document(document_id)
+    get_bm25_index().delete_document(document_id)
     doc.status = DocumentStatus.DELETED
     doc.deleted_at = datetime.utcnow()
     doc.error_message = None
@@ -85,6 +87,7 @@ def delete_deleted_document(document_id: str, db: Session = Depends(get_db)):
     if not doc:
         raise HTTPException(status_code=404, detail="Deleted document not found")
     vector_store.delete_document(document_id)
+    get_bm25_index().delete_document(document_id)
     db.delete(doc)
     db.commit()
     return {"deleted": True}

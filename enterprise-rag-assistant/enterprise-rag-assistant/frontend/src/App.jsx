@@ -187,7 +187,7 @@ export default function App() {
   };
 
   const [strategy, setStrategy] = useState("hybrid");
-  const [topK, setTopK] = useState(6);
+  const [topK, setTopK] = useState(10);
 
   const handleSend = async () => {
     if (!input.trim() || loading) return;
@@ -306,8 +306,8 @@ export default function App() {
             <span style={styles.controlLabel}>Retrieval Depth:</span>
             <select style={styles.select} value={topK} onChange={(e) => setTopK(e.target.value)}>
               <option value="4">Top 4 Chunks</option>
-              <option value="6">Top 6 Chunks (Default)</option>
-              <option value="10">Top 10 Chunks (Deep)</option>
+              <option value="6">Top 6 Chunks</option>
+              <option value="10">Top 10 Chunks (Default)</option>
               <option value="15">Top 15 Chunks (500+ Page Docs)</option>
             </select>
           </div>

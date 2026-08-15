@@ -18,6 +18,7 @@ from app.drive.drive_service import DriveService
 from app.models import Document, DocumentStatus
 from app.rag import vector_store
 from app.rag.pipeline import process_document
+from app.rag.bm25_retriever import get_bm25_index
 from app.config import get_settings
 from app.utils.logger import logger
 
@@ -80,6 +81,7 @@ def run_sync(db: Session) -> int:
         if doc.drive_file_id not in drive_file_ids:
             logger.info(f"'{doc.file_name}' removed from Drive - marking deleted.")
             vector_store.delete_document(doc.id)
+            get_bm25_index().delete_document(doc.id)
             doc.status = DocumentStatus.DELETED
             doc.deleted_at = datetime.utcnow()
             doc.error_message = None

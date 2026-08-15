@@ -36,3 +36,16 @@ def test_multiple_pages_keep_independent_page_numbers():
 def test_empty_pages_produce_no_chunks():
     chunks = chunk_pages([], chunk_size=500, overlap=50)
     assert chunks == []
+
+
+def test_parent_context_keeps_a_match_near_the_end_of_a_long_page():
+    """A late-page match must not receive only the page's opening text."""
+    opening = " ".join(["introduction"] * 1800)
+    target = "The emergency retention period is exactly 73 days."
+    closing = " ".join(["appendix"] * 300)
+    page = PageText(page_number=42, text=f"{opening} {target} {closing}")
+
+    chunks = chunk_pages([page], chunk_size=120, overlap=20, parent_chunk_size=300)
+    matching_chunk = next(chunk for chunk in chunks if "73 days" in chunk.text)
+
+    assert "73 days" in matching_chunk.parent_text

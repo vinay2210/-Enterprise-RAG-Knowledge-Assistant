@@ -102,6 +102,8 @@ class BM25Index:
             if not candidate_ids:
                 return []
 
+            candidate_set = set(candidate_ids)
+
             scores: dict[str, float] = {}
 
             for q_token in q_tokens:
@@ -115,9 +117,9 @@ class BM25Index:
                 if idf <= 0:
                     idf = 0.01
 
-                for cid in candidate_ids:
-                    if cid not in matching_docs:
-                        continue
+                # Work only on matching chunks.  Scanning every candidate for
+                # every term becomes needlessly expensive on 500-page manuals.
+                for cid in matching_docs & candidate_set:
                     tokens = self.doc_tokens[cid]
                     f_q = tokens.count(q_token)
                     if f_q == 0:

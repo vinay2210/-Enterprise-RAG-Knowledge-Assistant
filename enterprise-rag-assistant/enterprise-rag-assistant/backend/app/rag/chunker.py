@@ -55,74 +55,105 @@ def chunk_pages(
     pages: list[PageText],
     child_chunk_size: int | None = None,
     child_overlap: int | None = None,
-    parent_chunk_size: int = 1000,
+    parent_chunk_size: int = 1500,
+    # Backwards-compatible names used by the existing tests and any external callers.
+    chunk_size: int | None = None,
+    overlap: int | None = None,
 ) -> list[Chunk]:
-    """Hierarchical & Structural Chunking:
-    - Splits document into semantic paragraphs/sections.
-    - Creates compact Child Chunks (default ~250 tokens) for vector similarity precision.
-    - Binds each child chunk to a Parent Context (up to ~1000 tokens / page context) so the LLM
-      gets full sentence/paragraph structures without losing page attribution.
+    """Create overlapping, page-scoped child chunks with local parent context.
+
+    A parent context must always contain the child chunk it belongs to.  Using the
+    first ``parent_chunk_size`` tokens of an entire page breaks this invariant for
+    a match near the end of a dense PDF page: retrieval finds the right child, but
+    the LLM receives unrelated text from the beginning of that page.  This is
+    especially harmful in long manuals.  Instead, each parent is a window centred
+    on its child, while still retaining page-level citations.
     """
-    child_chunk_size = child_chunk_size or 250
-    child_overlap = child_overlap or 50
+    child_chunk_size = child_chunk_size or chunk_size or settings.chunk_size_tokens
+    child_overlap = child_overlap if child_overlap is not None else overlap
+    child_overlap = settings.chunk_overlap_tokens if child_overlap is None else child_overlap
+
+    if child_chunk_size <= 0:
+        raise ValueError("child_chunk_size must be greater than zero")
+    if child_overlap < 0 or child_overlap >= child_chunk_size:
+        raise ValueError("child_overlap must be at least zero and smaller than child_chunk_size")
+    parent_chunk_size = max(parent_chunk_size, child_chunk_size)
 
     chunks: list[Chunk] = []
     global_idx = 0
+
+    # Keep neighbouring pages available for a small amount of boundary context.
+    page_texts: dict[int, str] = {}
+    for page in pages:
+        page_text = page.text.strip()
+        if page_text:
+            page_texts[page.page_number] = page_text
 
     for page in pages:
         page_text = page.text.strip()
         if not page_text:
             continue
 
-        # Split page into structural paragraphs
-        paragraphs = [p.strip() for p in re.split(r"\n\n+", page_text) if p.strip()]
-        current_section = f"Page {page.page_number}"
+        page_tokens = _encoding.encode(page_text)
+        if not page_tokens:
+            continue
 
-        for i, para in enumerate(paragraphs):
-            heading = _extract_heading(para)
+        prev_page_text = page_texts.get(page.page_number - 1, "")
+        next_page_text = page_texts.get(page.page_number + 1, "")
+
+        # Associate each child with its closest preceding structural heading.
+        headings: list[tuple[int, str]] = [(0, f"Page {page.page_number}")]
+        offset = 0
+        for paragraph in (p.strip() for p in re.split(r"\n\n+", page_text) if p.strip()):
+            heading = _extract_heading(paragraph)
             if heading:
-                current_section = heading
+                headings.append((offset, heading))
+            offset += len(_encoding.encode(paragraph))
 
-            # Determine Parent Context (the paragraph itself or surrounding paragraphs on the page)
-            parent_context = page_text
-            para_tokens = _encoding.encode(para)
+        start = 0
+        while start < len(page_tokens):
+            end = min(start + child_chunk_size, len(page_tokens))
+            child_tokens = page_tokens[start:end]
+            child_text = _encoding.decode(child_tokens).strip()
 
-            if len(para_tokens) <= child_chunk_size:
-                child_text = para
+            # Centre the context around the retrieved child, rather than always
+            # taking text from the top of the page.
+            side_context = max((parent_chunk_size - len(child_tokens)) // 2, 0)
+            parent_start = max(0, start - side_context)
+            parent_end = min(len(page_tokens), end + side_context)
+            parent_tokens = page_tokens[parent_start:parent_end]
+
+            # If the local context hits a page boundary, spend only spare budget
+            # on neighbouring text.  The matching child is never trimmed away.
+            spare = parent_chunk_size - len(parent_tokens)
+            parent_parts: list[str] = []
+            if parent_start == 0 and prev_page_text and spare > 0:
+                previous = _encoding.encode(prev_page_text)[-min(spare, 120):]
+                if previous:
+                    parent_parts.append("[...from previous page] " + _encoding.decode(previous).strip())
+                    spare -= len(previous)
+            parent_parts.append(_encoding.decode(parent_tokens).strip())
+            if parent_end == len(page_tokens) and next_page_text and spare > 0:
+                following = _encoding.encode(next_page_text)[:min(spare, 120)]
+                if following:
+                    parent_parts.append("[continues on next page...] " + _encoding.decode(following).strip())
+
+            section_title = next((title for position, title in reversed(headings) if position <= start), headings[0][1])
+            if child_text:
                 chunks.append(
                     Chunk(
                         chunk_index=global_idx,
                         page_number=page.page_number,
                         text=child_text,
-                        parent_text=parent_context,
-                        token_count=len(para_tokens),
-                        section_title=current_section,
+                        parent_text="\n\n".join(parent_parts),
+                        token_count=len(child_tokens),
+                        section_title=section_title,
                     )
                 )
                 global_idx += 1
-            else:
-                # Large paragraph: sliding window child chunks inside the paragraph context
-                start = 0
-                while start < len(para_tokens):
-                    end = min(start + child_chunk_size, len(para_tokens))
-                    piece_tokens = para_tokens[start:end]
-                    child_text = _encoding.decode(piece_tokens).strip()
 
-                    if child_text:
-                        chunks.append(
-                            Chunk(
-                                chunk_index=global_idx,
-                                page_number=page.page_number,
-                                text=child_text,
-                                parent_text=parent_context,
-                                token_count=len(piece_tokens),
-                                section_title=current_section,
-                            )
-                        )
-                        global_idx += 1
-
-                    if end == len(para_tokens):
-                        break
-                    start = end - child_overlap
+            if end == len(page_tokens):
+                break
+            start = end - child_overlap
 
     return chunks

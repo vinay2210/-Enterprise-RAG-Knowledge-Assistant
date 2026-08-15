@@ -16,6 +16,11 @@ from app.utils.logger import logger
 
 settings = get_settings()
 
+# ChromaDB has a metadata value size limit. We cap parent_text stored in
+# metadata to avoid silent truncation or errors. The full parent_text is
+# always available in the SQL DocumentChunk table for LLM context assembly.
+_MAX_METADATA_TEXT_CHARS = 4000
+
 
 @lru_cache
 def get_chroma_client():
@@ -44,7 +49,9 @@ def upsert_chunks(document_id: str, file_name: str, chunks: list, embeddings: li
             "file_name": file_name,
             "chunk_index": c.chunk_index,
             "page_number": c.page_number,
-            "parent_text": getattr(c, "parent_text", c.text),
+            # Truncate parent_text for metadata to avoid Chroma size limits.
+            # Full parent_text is stored in the SQL DocumentChunk table.
+            "parent_text": (getattr(c, "parent_text", c.text) or c.text)[:_MAX_METADATA_TEXT_CHARS],
             "section_title": getattr(c, "section_title", ""),
         }
         for c in chunks
@@ -69,6 +76,9 @@ def upsert_chunks(document_id: str, file_name: str, chunks: list, embeddings: li
 def query(query_text: str, top_k: int = 10, file_names: list[str] | None = None) -> list[dict]:
     try:
         collection = get_collection()
+        collection_count = collection.count()
+        if collection_count == 0:
+            return []
         embedder = get_embedder()
         query_vector = embedder.embed_query(query_text)
 
@@ -78,7 +88,10 @@ def query(query_text: str, top_k: int = 10, file_names: list[str] | None = None)
 
         results = collection.query(
             query_embeddings=[query_vector],
-            n_results=top_k,
+            # Chroma rejects a request larger than the collection.  A fixed
+            # candidate pool (50+) is useful for large manuals, but must still
+            # work while a small or newly uploaded document is the only one.
+            n_results=min(top_k, collection_count),
             where=where,
         )
 

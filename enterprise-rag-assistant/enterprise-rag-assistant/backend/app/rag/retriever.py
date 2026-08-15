@@ -2,7 +2,13 @@
 Retrieval layer sitting between the vector store and the chat API.
 Handles: global search, file-scoped (@filename) search, multi-document
 search, and turns raw vector hits into Citation-ready dicts.
+
+For large documents (500+ pages), this module:
+  - Uses higher candidate counts for better recall
+  - Enriches hits with full parent_text from the SQL mirror (avoiding Chroma metadata truncation)
+  - Applies simple query expansion to improve semantic coverage
 """
+import re
 from app.rag import vector_store
 from app.rag.bm25_retriever import get_bm25_index
 from app.utils.logger import logger
@@ -35,9 +41,70 @@ def _reciprocal_rank_fusion(dense_hits: list[dict], bm25_hits: list[dict], k: in
     return fused_results
 
 
+def _enrich_parent_text_from_sql(hits: list[dict]) -> list[dict]:
+    """Replace potentially-truncated parent_text from Chroma metadata with the full
+    version stored in the SQL DocumentChunk table. This is critical for large pages
+    where Chroma metadata truncates the parent context."""
+    if not hits:
+        return hits
+
+    try:
+        from app.database import SessionLocal
+        from app.models import DocumentChunk
+
+        vector_ids = [h["vector_id"] for h in hits]
+        db = SessionLocal()
+        try:
+            sql_chunks = db.query(DocumentChunk).filter(DocumentChunk.vector_id.in_(vector_ids)).all()
+            sql_map = {sc.vector_id: sc for sc in sql_chunks}
+
+            for hit in hits:
+                sql_chunk = sql_map.get(hit["vector_id"])
+                if sql_chunk and sql_chunk.parent_text:
+                    hit["parent_text"] = sql_chunk.parent_text
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"Failed to enrich parent_text from SQL, using Chroma metadata: {e}")
+
+    return hits
+
+
+def _expand_query(question: str) -> str:
+    """Simple query expansion: extract key noun phrases and append them.
+    This helps bridge vocabulary mismatches between user questions and document text,
+    which is especially important for large documents with varied terminology."""
+    # Remove common question words and stopwords to focus on content terms
+    stopwords = {
+        "what", "which", "where", "when", "who", "whom", "whose", "why", "how",
+        "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "having",
+        "do", "does", "did", "doing",
+        "a", "an", "the", "and", "but", "or", "nor", "not", "no",
+        "in", "on", "at", "to", "for", "of", "with", "by", "from",
+        "as", "into", "through", "during", "before", "after",
+        "about", "between", "above", "below",
+        "can", "could", "would", "should", "shall", "will", "may", "might", "must",
+        "it", "its", "this", "that", "these", "those",
+        "i", "me", "my", "we", "us", "our", "you", "your", "he", "him", "his",
+        "she", "her", "they", "them", "their",
+        "tell", "explain", "describe", "define", "give", "list", "show",
+        "please", "also", "just", "only", "very", "much", "more",
+    }
+
+    words = re.findall(r"\b[a-zA-Z0-9_]+\b", question.lower())
+    key_terms = [w for w in words if w not in stopwords and len(w) > 2]
+
+    if key_terms:
+        # Append key terms to boost their weight in both vector and BM25 search
+        expansion = " ".join(key_terms)
+        return f"{question} {expansion}"
+    return question
+
+
 def retrieve(
     question: str,
-    top_k: int = 6,
+    top_k: int = 10,
     file_filter: list[str] | None = None,
     strategy: str = "hybrid",
 ) -> list[dict]:
@@ -46,20 +113,31 @@ def retrieve(
     - 'vector': Dense vector similarity only
     - 'bm25': BM25 keyword search only
     """
-    candidate_k = max(top_k * 4, 30)
+    # Use higher candidate pool for better recall on large documents
+    # Search a deliberately wider pool before fusion.  With hundreds of pages,
+    # top-6 alone is too narrow for dense retrieval to recover a relevant
+    # section expressed with different wording.
+    candidate_k = max(top_k * 10, 100)
+
+    # Expand query for better coverage on large, terminology-rich documents
+    expanded_question = _expand_query(question)
 
     if strategy == "vector":
-        hits = vector_store.query(question, top_k=max(top_k, 12), file_names=file_filter)
+        hits = vector_store.query(expanded_question, top_k=max(top_k, 15), file_names=file_filter)
     elif strategy == "bm25":
         bm25_index = get_bm25_index()
-        hits = bm25_index.query(question, top_k=max(top_k, 12), file_names=file_filter)
+        hits = bm25_index.query(question, top_k=max(top_k, 15), file_names=file_filter)
     else:  # hybrid
-        dense_hits = vector_store.query(question, top_k=candidate_k, file_names=file_filter)
+        # Use expanded query for dense search (semantic), original for BM25 (exact keywords)
+        dense_hits = vector_store.query(expanded_question, top_k=candidate_k, file_names=file_filter)
         bm25_index = get_bm25_index()
         bm25_hits = bm25_index.query(question, top_k=candidate_k, file_names=file_filter)
 
         fused = _reciprocal_rank_fusion(dense_hits, bm25_hits)
         hits = fused[:top_k]
+
+    # Enrich with full parent_text from SQL (not truncated Chroma metadata)
+    hits = _enrich_parent_text_from_sql(hits)
 
     # Deduplicate contiguous page contexts for clean prompt feeding
     seen_pages = set()
